@@ -9,6 +9,8 @@ from maskrcnn_benchmark.structures.image_list import to_image_list
 from maskrcnn_benchmark.modeling.roi_heads.mask_head.inference import Masker
 from maskrcnn_benchmark import layers as L
 from maskrcnn_benchmark.utils import cv2_util
+from maskrcnn_benchmark.utils.colormaps import colormap
+
 
 class Resize(object):
     def __init__(self, min_size, max_size):
@@ -42,6 +44,8 @@ class Resize(object):
         size = self.get_size(image.size)
         image = F.resize(image, size)
         return image
+
+
 class COCODemo(object):
     # COCO categories for pretty print
     CATEGORIES = [
@@ -129,13 +133,13 @@ class COCODemo(object):
     ]
 
     def __init__(
-        self,
-        cfg,
-        confidence_threshold=0.7,
-        show_mask_heatmaps=False,
-        masks_per_dim=2,
-        min_image_size=224,
-        weight_loading = None
+            self,
+            cfg,
+            confidence_threshold=0.7,
+            show_mask_heatmaps=False,
+            masks_per_dim=2,
+            min_image_size=224,
+            weight_loading=None
     ):
         self.cfg = cfg.clone()
         self.model = build_detection_model(cfg)
@@ -147,11 +151,11 @@ class COCODemo(object):
         save_dir = cfg.OUTPUT_DIR
         checkpointer = DetectronCheckpointer(cfg, self.model, save_dir=save_dir)
         _ = checkpointer.load(cfg.MODEL.WEIGHT)
-        
+
         if weight_loading:
             print('Loading weight from {}.'.format(weight_loading))
             _ = checkpointer._load_model(torch.load(weight_loading))
-        
+
         self.transforms = self.build_transform()
 
         mask_threshold = -1 if show_mask_heatmaps else 0.5
@@ -406,9 +410,90 @@ class COCODemo(object):
 
         return image
 
+
+class KittiDemo(COCODemo):
+
+    CATEGORIES = [
+        '__background',
+        'bicycle',
+        'bus',
+        'car',
+        'caravan',
+        'motorcycle',
+        'person',
+        'rider',
+        'trailer',
+        'train',
+        'truck',
+    ]
+
+    CATEGORIES_INTEREST = [
+        'bicycle',
+        'bus',
+        'car',
+        'motorcycle',
+        'person',
+        'rider',
+        'train',
+        'truck',
+    ]
+
+    def select_interest_labels(self, predictions, interest=None):
+        if interest is None:
+            interest = self.CATEGORIES_INTEREST
+        labels = predictions.get_field("labels")
+        labels = labels.numpy()
+        categories_str = [self.CATEGORIES[i] for i in labels]
+        keep = [True if cat in interest else False for cat in categories_str]
+        predictions = predictions[keep]
+        labels = predictions.get_field("labels")
+        _, idx = labels.sort(0, descending=True)
+        return predictions[idx]
+
+    def merge_rider_bicycle_labels(self, predictions):
+        predictions_tomerge = self.select_interest_labels(predictions, interest=['rider', 'bicycle', 'motorcycle'])
+        return predictions
+
+    def overlay_mask(self, image, predictions):
+        """
+        Adds the instances contours for each predicted object.
+        Each label has a different color.
+
+        Arguments:
+            image (np.ndarray): an image as returned by OpenCV
+            predictions (BoxList): the result of the computation by the model.
+                It should contain the field `mask` and `labels`.
+        """
+        if len(predictions) <= 0:
+            return image
+        masks = predictions.get_field("mask").numpy()
+        labels = predictions.get_field("labels")
+
+        colors = self.compute_colors_for_labels(labels).tolist()
+        color_list = colormap(rgb=True) / 255
+
+        mask_color_id = 0
+        masks_coloured = np.zeros((masks.shape[2], masks.shape[3], 3))
+        for mask, color in zip(masks, colors):
+            thresh = mask[0, :, :, None]
+            # contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+            color_mask = color_list[mask_color_id % len(color_list), 0:3]
+            mask_color_id += 1
+            # mask_coloured = np.zeros((masks.shape[2], masks.shape[3], 3))
+            mask_coloured = thresh * color_mask * 255
+            # print(mask_coloured.shape)
+            masks_coloured += mask_coloured
+
+        composite = cv2.addWeighted(image, 1.0, masks_coloured.astype(np.uint8), 0.5, 0)
+
+        return composite
+
+
 import numpy as np
 import matplotlib.pyplot as plt
 from maskrcnn_benchmark.structures.keypoint import PersonKeypoints
+
 
 def vis_keypoints(img, kps, kp_thresh=2, alpha=0.7):
     """Visualizes keypoints (adapted from vis_one_image).
@@ -426,15 +511,13 @@ def vis_keypoints(img, kps, kp_thresh=2, alpha=0.7):
     kp_mask = np.copy(img)
 
     # Draw mid shoulder / mid hip first for better visualization.
-    mid_shoulder = (
-        kps[:2, dataset_keypoints.index('right_shoulder')] +
-        kps[:2, dataset_keypoints.index('left_shoulder')]) / 2.0
+    mid_shoulder = (kps[:2, dataset_keypoints.index('right_shoulder')] +
+                    kps[:2, dataset_keypoints.index('left_shoulder')]) / 2.0
     sc_mid_shoulder = np.minimum(
         kps[2, dataset_keypoints.index('right_shoulder')],
         kps[2, dataset_keypoints.index('left_shoulder')])
-    mid_hip = (
-        kps[:2, dataset_keypoints.index('right_hip')] +
-        kps[:2, dataset_keypoints.index('left_hip')]) / 2.0
+    mid_hip = (kps[:2, dataset_keypoints.index('right_hip')] +
+               kps[:2, dataset_keypoints.index('left_hip')]) / 2.0
     sc_mid_hip = np.minimum(
         kps[2, dataset_keypoints.index('right_hip')],
         kps[2, dataset_keypoints.index('left_hip')])
