@@ -1,7 +1,9 @@
 import numpy as np
 import os
 import cv2
+import pickle
 import matplotlib.pyplot as plt
+from pycocotools import mask as pycocomask
 from PIL import Image
 from tqdm import tqdm
 from maskrcnn_benchmark.config import cfg
@@ -46,10 +48,17 @@ for seq_id in tqdm(range(len(seq_list))):
     seq = seq_list[seq_id]
     seq_dir = os.path.join(seq_path, seq)
     img_files = sorted(os.listdir(seq_dir))
+    result_dir = os.path.join(result_folder, seq)
+
+    if not os.path.exists(os.path.join(result_dir, 'mrcnn_viz')):
+        os.makedirs(os.path.join(result_dir, 'mrcnn_viz'))
+    if not os.path.exists(os.path.join(result_dir, 'mrcnn_masks')):
+        os.makedirs(os.path.join(result_dir, 'mrcnn_masks'))
 
     boxes_all = []
     scores_all = []
     labels_all = []
+    masks_all = []
     img_idx_all = []
 
     for idx in range(len(img_files)):
@@ -64,11 +73,16 @@ for seq_id in tqdm(range(len(seq_list))):
         boxes = top_predictions.bbox.tolist()
         labels = top_predictions.get_field("labels").tolist()
         scores = top_predictions.get_field("scores").tolist()
+        masks = top_predictions.get_field("mask").numpy()
 
-        for (box, label, score) in zip(boxes, labels, scores):
+        for dt_id, (box, label, score, mask) in enumerate(zip(boxes, labels, scores, masks)):
             boxes_all.append(box)
             labels_all.append(label)
             scores_all.append(score)
+            mask = np.asfortranarray(mask[0].astype(np.uint8))
+            mask_encode = pycocomask.encode(mask)
+            mask = {'dt_id': dt_id, 'mask_encode': mask_encode}
+            masks_all.append(mask)
             img_idx_all.append(idx)
 
         pred_img = image.copy()
@@ -78,11 +92,15 @@ for seq_id in tqdm(range(len(seq_list))):
             pred_img = kitti_demo.overlay_mask(pred_img, top_predictions)
         result = kitti_demo.overlay_class_names(pred_img, top_predictions)
 
-        if not os.path.exists(os.path.join(result_folder, seq)):
-            os.makedirs(os.path.join(result_folder, seq))
-        cv2.imwrite('{}/{}/{}'.format(result_folder, seq, img_files[idx]), pred_img)
+        cv2.imwrite('{}/{}/{}'.format(result_dir, 'mrcnn_viz', img_files[idx]), pred_img)
 
-    with open(os.path.join(result_folder, seq + '.txt'), 'w') as f:
-        for (box, score, label, idx) in zip(boxes_all, scores_all, labels_all, img_idx_all):
+    with open(os.path.join(result_dir, 'mrcnn_dts.txt'), 'w') as f:
+        for (box, score, label, mask, idx) in zip(boxes_all, scores_all, labels_all, masks_all, img_idx_all):
             f.write('{} {} {:.2f} {:.2f} {:.2f} {:.2f} {:.4f}\n'.format(int(img_files[idx][:-4]), label, box[0], box[1],
                                                                         box[2], box[3], score))
+            dt_id = mask['dt_id']
+            mask_encode = mask['mask_encode']
+            mask_path_encode = os.path.join(result_dir, 'mrcnn_masks',
+                                            img_files[idx][:-4] + '_' + "{:02d}".format(dt_id) + '.pkl')
+            with open(mask_path_encode, 'wb') as f_mask:
+                pickle.dump(mask_encode, f_mask)
